@@ -1,20 +1,19 @@
-// START OF TEST server.js (Reports every 5 reviews)
+// START OF FINAL TEST server.js (Reports every 5 reviews with PDF on WhatsApp)
 
 const express = require('express');
 const cors = require('cors');
-// cron ما زال موجوداً لكننا سنعتمد على العداد للتجربة بشكل أساسي
-const cron = require('node-cron'); 
+const cron = require('node-cron');
 const { Client } = require('pg');
 require('dotenv').config();
 
 const { sendReportEmail } = require('./notifications.js');
 const { createCumulativePdfReport } = require('./pdfGenerator.js');
-const { sendTextMessage } = require('./whatsappSender.js');
+// <--- التغيير الأول: استدعاء الدالة الصحيحة من whatsappSender.js
+const { sendPdfViaWhatsApp } = require('./whatsappSender.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// <-- جديد: متغيرات لتتبع عدد التقييمات ومنع التضارب
 let reviewCounter = 0;
 let isGeneratingReport = false;
 
@@ -29,14 +28,11 @@ const dbClient = new Client({
 
 let dbReady = false;
 
-
-// <-- جديد: دالة خاصة لإرسال التقارير المجمعة كل 5 تقييمات
 async function generateAndSendBatchReport() {
     console.log('🚀 Triggering batch report for the last 5 reviews...');
-    isGeneratingReport = true; // نمنع تشغيل التقارير الأخرى أثناء عمل هذه الدالة
+    isGeneratingReport = true;
 
     try {
-        // استعلامات لجلب آخر 5 تقييمات وإحصائياتها
         const recentReviewsQuery = 'SELECT * FROM reviews ORDER BY id DESC LIMIT 5';
         const statsQuery = `
             SELECT 
@@ -54,6 +50,7 @@ async function generateAndSendBatchReport() {
 
         if (stats.total_reviews == 0) {
             console.log('ℹ️ No reviews found for the batch report.');
+            isGeneratingReport = false;
             return;
         }
 
@@ -70,22 +67,22 @@ async function generateAndSendBatchReport() {
         await sendReportEmail(emailSubject, htmlContent, attachments);
         console.log(`✅ Batch report sent successfully via email.`);
 
+        // <--- التغيير الثاني: استدعاء دالة إرسال الـ PDF بالبيانات الصحيحة
         const whatsappRecipient = process.env.WHATSAPP_RECIPIENT_NUMBER;
         if (whatsappRecipient) {
-            const whatsappMessage = `*تقرير فندق ماريوت (دفعة جديدة)* 🏨\n\nتم إرسال *${title}* بنجاح إلى البريد الإلكتروني.\n\n- *عدد التقييمات في الدفعة:* ${stats.total_reviews}`;
-            await sendTextMessage(whatsappRecipient, whatsappMessage);
+            const caption = `*تقرير فندق ماريوت* 🏨\n\nإليك *${title}*.\n\n- إجمالي التقييمات: ${stats.total_reviews}\n- تاريخ: ${new Date().toLocaleDateString('ar-EG')}`;
+            const pdfFilename = `report-${Date.now()}.pdf`;
+            await sendPdfViaWhatsApp(whatsappRecipient, pdfBuffer, pdfFilename, caption);
         }
 
     } catch (err) {
         console.error(`❌ CRITICAL: Failed to generate BATCH report:`, err);
     } finally {
-        isGeneratingReport = false; // نسمح بتشغيل التقارير مرة أخرى
+        isGeneratingReport = false;
         console.log('🔄 Batch report process finished.');
     }
 }
 
-
-// ------------------- نقطة النهاية لاستقبال التقييمات (مع التعديل) -------------------
 app.post('/api/review', async (req, res) => {
     if (!dbReady) {
         return res.status(503).json({ success: false, message: 'السيرفر غير جاهز حاليًا.' });
@@ -101,15 +98,12 @@ app.post('/api/review', async (req, res) => {
         await dbClient.query(query);
         res.status(201).json({ success: true, message: 'شكرًا لك! تم استلام تقييمك بنجاح.' });
         
-        // <-- جديد: زيادة العداد والتحقق منه بعد إرسال الرد للمستخدم مباشرة
         reviewCounter++;
         console.log(`📈 Review count is now: ${reviewCounter}`);
         
         if (reviewCounter >= 5 && !isGeneratingReport) {
-            // تصفير العداد فوراً
             reviewCounter = 0; 
             console.log('🚩 Reached 5 reviews! Resetting counter and starting report generation in background.');
-            // تشغيل الدالة في الخلفية حتى لا يتأخر الرد على المستخدم
             generateAndSendBatchReport();
         }
 
@@ -119,8 +113,6 @@ app.post('/api/review', async (req, res) => {
     }
 });
 
-
-// ------------------- تشغيل السيرفر وقاعدة البيانات -------------------
 app.listen(PORT, () => {
     console.log(`🚀 Server is listening on port ${PORT}`);
     dbClient.connect()
@@ -135,9 +127,10 @@ app.listen(PORT, () => {
             `);
             dbReady = true;
             console.log("✅ Database is ready.");
-            // setupScheduledTasks(); // يمكنك تعطيل المهام المجدولة مؤقتاً أثناء التجربة
         })
         .catch(error => {
             console.error('❌ CRITICAL: DB Connection/Setup Failed:', error);
         });
 });
+
+// END OF FILE
